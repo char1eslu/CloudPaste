@@ -41,7 +41,7 @@ systemRoutes.put("/api/admin/system-settings", baseAuthMiddleware, requireAdminM
 
     // 验证webdav_upload_mode参数（如果存在）
     if (body.webdav_upload_mode !== undefined) {
-      const validModes = ["auto", "proxy", "multipart", "direct"];
+      const validModes = ["multipart", "direct"];
       if (!validModes.includes(body.webdav_upload_mode)) {
         return c.json(createErrorResponse(ApiStatus.BAD_REQUEST, `WebDAV上传模式无效，有效值为: ${validModes.join(", ")}`), ApiStatus.BAD_REQUEST);
       }
@@ -111,6 +111,58 @@ systemRoutes.get("/api/admin/dashboard/stats", baseAuthMiddleware, requireAdminM
     console.error("获取仪表盘统计数据失败:", error);
     return c.json(createErrorResponse(ApiStatus.INTERNAL_ERROR, "获取仪表盘统计数据失败: " + error.message), ApiStatus.INTERNAL_ERROR);
   }
+});
+
+// 获取系统版本信息（公共API）
+systemRoutes.get("/api/version", async (c) => {
+  // 判断运行环境和数据存储
+  const runtimeEnv = process.env.RUNTIME_ENV || "unknown";
+  const isDocker = runtimeEnv === "docker";
+
+  // 统一的默认版本配置
+  const DEFAULT_VERSION = "0.7.0";
+  const DEFAULT_NAME = "cloudpaste-api";
+
+  let version = DEFAULT_VERSION;
+  let name = DEFAULT_NAME;
+
+  // 根据环境获取版本信息
+  if (isDocker) {
+    // Docker环境：尝试读取package.json
+    try {
+      const fs = await import("fs");
+      const path = await import("path");
+      const packagePath = path.resolve("./package.json");
+      const packageContent = fs.readFileSync(packagePath, "utf8");
+      const packageJson = JSON.parse(packageContent);
+
+      version = packageJson.version || DEFAULT_VERSION;
+      name = packageJson.name || DEFAULT_NAME;
+    } catch (error) {
+      console.warn("Docker环境读取package.json失败，使用默认值:", error.message);
+      // 保持默认值
+    }
+  } else {
+    // Workers环境：使用环境变量或默认值
+    version = process.env.APP_VERSION || DEFAULT_VERSION;
+    name = process.env.APP_NAME || DEFAULT_NAME;
+  }
+
+  const versionInfo = {
+    version,
+    name,
+    environment: isDocker ? "Docker" : "Cloudflare Workers",
+    storage: isDocker ? "SQLite" : "Cloudflare D1",
+    nodeVersion: process.version || "unknown",
+    uptime: Math.round(process.uptime()),
+  };
+
+  return c.json({
+    code: ApiStatus.SUCCESS,
+    message: "获取版本信息成功",
+    data: versionInfo,
+    success: true,
+  });
 });
 
 export default systemRoutes;

@@ -7,27 +7,27 @@
       </div>
       <div class="flex flex-wrap gap-2">
         <button
-            @click="loadFiles"
-            class="px-3 py-1.5 rounded text-sm font-medium transition-colors"
-            :class="darkMode ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'"
+          @click="loadFiles"
+          class="px-3 py-1.5 rounded text-sm font-medium transition-colors"
+          :class="darkMode ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'"
         >
           <span class="flex items-center">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
               />
             </svg>
             刷新
           </span>
         </button>
         <button
-            @click="deleteSelectedFiles"
-            :disabled="selectedFiles.length === 0"
-            class="px-3 py-1.5 rounded text-sm font-medium transition-colors"
-            :class="
+          @click="deleteSelectedFiles"
+          :disabled="selectedFiles.length === 0"
+          class="px-3 py-1.5 rounded text-sm font-medium transition-colors"
+          :class="
             darkMode
               ? selectedFiles.length === 0
                 ? 'bg-gray-600 cursor-not-allowed'
@@ -40,10 +40,10 @@
           <span class="flex items-center">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
               />
             </svg>
             批量删除 {{ selectedFiles.length ? `(${selectedFiles.length})` : "" }}
@@ -83,16 +83,16 @@
     <!-- 文件列表 -->
     <div v-if="!loading" class="flex-1">
       <FileTable
-          :files="files"
-          :dark-mode="darkMode"
-          :selected-files="selectedFiles"
-          :user-type="props.userType"
-          @toggle-select="toggleSelectItem"
-          @toggle-select-all="toggleSelectAll"
-          @edit="openEditModal"
-          @preview="openPreviewModal"
-          @delete="handleFileDelete"
-          @generate-qr="generateQRCode"
+        :files="files"
+        :dark-mode="darkMode"
+        :selected-files="selectedFiles"
+        :user-type="props.userType"
+        @toggle-select="toggleSelectItem"
+        @toggle-select-all="toggleSelectAll"
+        @edit="openEditModal"
+        @preview="openPreviewModal"
+        @delete="handleFileDelete"
+        @generate-qr="generateQRCode"
       />
     </div>
 
@@ -152,7 +152,7 @@ const apiGetFile = (id) => (isAdmin() ? api.file.getFile(id) : api.file.getUserF
 
 const apiUpdateFile = (id, metadata) => (isAdmin() ? api.file.updateFile(id, metadata) : api.file.updateUserFile(id, metadata));
 
-const apiDeleteFile = (id) => (isAdmin() ? api.file.deleteFile(id) : api.file.deleteUserFile(id));
+const apiBatchDeleteFiles = (ids) => (isAdmin() ? api.file.batchDeleteFiles(ids) : api.file.batchDeleteUserFiles(ids));
 
 /**
  * 状态变量定义
@@ -302,17 +302,25 @@ const handleFileDelete = async (id) => {
     error.value = "";
     successMessage.value = "";
 
-    // 调用API删除文件
-    const response = await apiDeleteFile(id);
+    // 使用批量删除接口删除单个文件
+    const response = await apiBatchDeleteFiles([id]);
 
     if (response.success) {
-      // 重新加载数据
-      loadFiles();
-      // 显示成功消息
-      successMessage.value = "删除成功";
-      setTimeout(() => {
-        successMessage.value = "";
-      }, 4000);
+      // 检查批量删除结果
+      if (response.data && response.data.failed && response.data.failed.length > 0) {
+        // 删除失败
+        const failedItem = response.data.failed[0];
+        error.value = failedItem.error || "删除失败";
+      } else {
+        // 删除成功
+        successMessage.value = "删除成功";
+        setTimeout(() => {
+          successMessage.value = "";
+        }, 4000);
+
+        // 重新加载数据
+        loadFiles();
+      }
     } else {
       error.value = response.message || "删除失败";
     }
@@ -343,17 +351,35 @@ const deleteSelectedFiles = async () => {
     error.value = "";
     successMessage.value = "";
 
-    // 逐个删除选中的文件
-    const promises = selectedFiles.value.map((id) => apiDeleteFile(id));
-    await Promise.all(promises);
+    // 使用批量删除接口
+    const result = await apiBatchDeleteFiles(selectedFiles.value);
+
+    // 检查批量删除结果
+    if (result.success && result.data) {
+      const { success: successCount, failed } = result.data;
+
+      if (failed && failed.length > 0) {
+        // 部分失败
+        const failedCount = failed.length;
+        successMessage.value = `批量删除完成：成功 ${successCount} 个，失败 ${failedCount} 个`;
+
+        // 显示失败的详细信息
+        const failedDetails = failed.map((item) => `ID: ${item.id} - ${item.error}`).join("\n");
+        console.warn("部分文件删除失败:", failedDetails);
+      } else {
+        // 全部成功
+        successMessage.value = `成功删除 ${successCount} 个文件`;
+      }
+    } else {
+      successMessage.value = `成功删除 ${selectedCount} 个文件`;
+    }
 
     // 清空选中列表
     selectedFiles.value = [];
     // 重新加载数据
     loadFiles();
 
-    // 显示成功消息
-    successMessage.value = `成功删除${selectedCount}个文件`;
+    // 自动隐藏成功消息
     setTimeout(() => {
       successMessage.value = "";
     }, 4000);

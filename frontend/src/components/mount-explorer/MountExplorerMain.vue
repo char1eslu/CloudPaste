@@ -1,73 +1,163 @@
+<!--
+  重构后的文件浏览器主组件
+  使用新的分层架构，只负责UI展示和用户交互
+-->
 <template>
   <div class="mount-explorer-main">
     <!-- 操作按钮 -->
     <div class="card mb-4" :class="darkMode ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-200'">
       <div class="p-3">
         <FileOperations
-            :current-path="currentPath"
-            :is-virtual="directoryData?.isVirtual"
-            :dark-mode="darkMode"
-            :view-mode="viewMode"
-            :selected-items="selectedItems"
-            @upload="handleUpload"
-            @create-folder="handleCreateFolder"
-            @refresh="handleRefresh"
-            @change-view-mode="handleViewModeChange"
-            @openUploadModal="handleOpenUploadModal"
-            @openCopyModal="handleBatchCopy"
-            @openTasksModal="handleOpenTasksModal"
+          :current-path="currentPath"
+          :is-virtual="isVirtualDirectory"
+          :dark-mode="darkMode"
+          :view-mode="viewMode"
+          :selected-items="selectedItems"
+          @create-folder="handleCreateFolder"
+          @refresh="handleRefresh"
+          @change-view-mode="handleViewModeChange"
+          @openUploadModal="handleOpenUploadModal"
+          @openCopyModal="handleBatchCopy"
+          @openTasksModal="handleOpenTasksModal"
+          @task-created="handleTaskCreated"
+          @show-message="handleShowMessage"
         />
       </div>
     </div>
 
     <!-- 上传弹窗 -->
     <UploadModal
-        :is-open="showUploadModal"
-        :dark-mode="darkMode"
-        :current-path="currentPath"
-        :is-admin="isAdmin"
-        @close="handleCloseUploadModal"
-        @upload-success="handleUploadSuccess"
-        @upload-error="handleUploadError"
+      :is-open="isUploadModalOpen"
+      :current-path="currentPath"
+      :dark-mode="darkMode"
+      :is-admin="authStore.isAdmin"
+      @close="handleCloseUploadModal"
+      @upload-success="handleUploadSuccess"
+      @upload-error="handleUploadError"
     />
 
-    <!-- 复制模态窗口 -->
+    <!-- 复制弹窗 -->
     <CopyModal
-        :is-open="showCopyModal"
-        :dark-mode="darkMode"
-        :selected-items="selectedItems"
-        :source-path="currentPath"
-        :is-admin="isAdmin"
-        :api-key-info="apiKeyInfo"
-        @close="handleCloseCopyModal"
-        @copy-complete="handleCopyComplete"
+      :is-open="isCopyModalOpen"
+      :dark-mode="darkMode"
+      :selected-items="getSelectedItems()"
+      :source-path="currentPath"
+      :is-admin="authStore.isAdmin"
+      :api-key-info="authStore.apiKeyInfo"
+      @close="handleCloseCopyModal"
+      @copy-complete="handleCopyComplete"
     />
 
     <!-- 任务管理弹窗 -->
-    <TasksModal :is-open="showTasksModal" :dark-mode="darkMode" @close="handleCloseTasksModal" />
+    <TasksModal :is-open="isTasksModalOpen" :dark-mode="darkMode" @close="handleCloseTasksModal" />
+
+    <!-- 删除确认对话框 -->
+    <div v-if="showDeleteDialog" class="fixed inset-0 z-50 overflow-auto bg-black bg-opacity-50 flex items-center justify-center">
+      <div class="relative w-full max-w-md p-6 rounded-lg shadow-xl" :class="darkMode ? 'bg-gray-800' : 'bg-white'">
+        <div class="mb-4">
+          <h3 class="text-lg font-semibold" :class="darkMode ? 'text-gray-100' : 'text-gray-900'">
+            {{ itemsToDelete.length === 1 ? t("mount.delete.title") : t("mount.batchDelete.title") }}
+          </h3>
+          <p class="text-sm mt-1" :class="darkMode ? 'text-gray-400' : 'text-gray-500'">
+            <template v-if="itemsToDelete.length === 1">
+              {{
+                t("mount.delete.message", {
+                  type: itemsToDelete[0]?.isDirectory ? t("mount.fileTypes.folder") : t("mount.fileTypes.file"),
+                  name: itemsToDelete[0]?.name,
+                })
+              }}
+              {{ itemsToDelete[0]?.isDirectory ? t("mount.delete.folderWarning") : "" }}
+            </template>
+            <template v-else>
+              {{ t("mount.batchDelete.message", { count: itemsToDelete.length }) }}
+              <div class="mt-2">
+                <div class="text-xs font-medium mb-1">{{ t("mount.batchDelete.selectedItems") }}</div>
+                <div class="max-h-32 overflow-y-auto bg-gray-50 dark:bg-gray-700 rounded p-2 text-xs">
+                  <div v-for="item in itemsToDelete.slice(0, 10)" :key="item.path" class="flex items-center py-0.5">
+                    <span class="truncate">{{ item.name }}</span>
+                    <span v-if="item.isDirectory" class="ml-1 text-gray-500">{{ t("mount.batchDelete.folder") }}</span>
+                  </div>
+                  <div v-if="itemsToDelete.length > 10" class="text-gray-500 py-0.5">
+                    {{ t("mount.batchDelete.moreItems", { count: itemsToDelete.length - 10 }) }}
+                  </div>
+                </div>
+              </div>
+            </template>
+          </p>
+        </div>
+
+        <div class="flex justify-end space-x-2">
+          <button
+            @click="cancelDelete"
+            :disabled="isDeleting"
+            class="px-4 py-2 rounded-md transition-colors"
+            :class="[darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-100', isDeleting ? 'opacity-50 cursor-not-allowed' : '']"
+          >
+            {{ itemsToDelete.length === 1 ? t("mount.delete.cancel") : t("mount.batchDelete.cancelButton") }}
+          </button>
+          <button
+            @click="confirmDelete"
+            :disabled="isDeleting"
+            class="px-4 py-2 rounded-md text-white transition-colors flex items-center space-x-2"
+            :class="[isDeleting ? 'bg-red-500 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700']"
+          >
+            <!-- 删除中的loading图标 -->
+            <svg v-if="isDeleting" class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path
+                class="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              ></path>
+            </svg>
+            <!-- 删除图标 -->
+            <svg v-else class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+              />
+            </svg>
+            <span>
+              {{
+                isDeleting
+                  ? itemsToDelete.length === 1
+                    ? t("mount.delete.deleting")
+                    : t("mount.batchDelete.deleting")
+                  : itemsToDelete.length === 1
+                  ? t("mount.delete.confirm")
+                  : t("mount.batchDelete.confirmButton")
+              }}
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 面包屑导航 -->
     <div class="mb-4">
       <BreadcrumbNav
-          :current-path="currentPath"
-          :dark-mode="darkMode"
-          :preview-file="isPreviewMode ? previewFile : null"
-          @navigate="navigateTo"
-          :is-checkbox-mode="isCheckboxMode"
-          :selected-count="selectedCount"
-          @toggle-checkbox-mode="toggleCheckboxMode"
-          @batch-delete="batchDelete"
-          @batch-copy="handleBatchCopy"
-          :basic-path="apiKeyInfo?.basic_path || '/'"
-          :user-type="isAdmin ? 'admin' : 'user'"
+        :current-path="currentPath"
+        :dark-mode="darkMode"
+        :preview-file="isPreviewMode ? previewFile : null"
+        @navigate="handleNavigate"
+        :is-checkbox-mode="isCheckboxMode"
+        :selected-count="selectedCount"
+        @toggle-checkbox-mode="toggleCheckboxMode"
+        @batch-delete="batchDelete"
+        @batch-copy="handleBatchCopy"
+        @batch-add-to-basket="handleBatchAddToBasket"
+        :basic-path="authStore.apiKeyInfo?.basic_path || '/'"
+        :user-type="authStore.isAdmin ? 'admin' : 'user'"
       />
     </div>
 
     <!-- 消息提示 -->
     <div v-if="message" class="mb-4">
       <div
-          class="p-3 rounded-md border"
-          :class="{
+        class="p-3 rounded-md border"
+        :class="{
           'bg-green-50 border-green-200 text-green-800 dark:bg-green-900/30 dark:border-green-700/50 dark:text-green-200': message.type === 'success',
           'bg-red-50 border-red-200 text-red-800 dark:bg-red-900/30 dark:border-red-700/50 dark:text-red-200': message.type === 'error',
           'bg-yellow-50 border-yellow-200 text-yellow-800 dark:bg-yellow-900/30 dark:border-yellow-700/50 dark:text-yellow-200': message.type === 'warning',
@@ -96,36 +186,56 @@
     <div class="card" :class="darkMode ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-200'">
       <!-- 文件列表模式 -->
       <div v-if="!isPreviewMode">
+        <!-- 错误提示 -->
+        <div v-if="error" class="mb-4 p-4 bg-red-100 dark:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-lg">
+          <div class="flex items-center">
+            <svg class="w-5 h-5 text-red-500 mr-2" fill="currentColor" viewBox="0 0 20 20">
+              <path
+                fill-rule="evenodd"
+                d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                clip-rule="evenodd"
+              ></path>
+            </svg>
+            <span class="text-red-800 dark:text-red-200">{{ error }}</span>
+          </div>
+        </div>
+
         <!-- 权限提示 -->
         <div v-if="!hasPermissionForCurrentPath" class="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg m-4">
           <div class="flex items-center">
             <svg class="w-5 h-5 text-yellow-600 dark:text-yellow-400 mr-2" fill="currentColor" viewBox="0 0 20 20">
               <path
-                  fill-rule="evenodd"
-                  d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
-                  clip-rule="evenodd"
+                fill-rule="evenodd"
+                d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
+                clip-rule="evenodd"
               ></path>
             </svg>
-            <span class="text-yellow-800 dark:text-yellow-200"> {{ t("mount.noPermissionForPath", { path: apiKeyInfo?.basic_path || "/" }) }} </span>
+            <span class="text-yellow-800 dark:text-yellow-200">
+              {{ t("mount.noPermissionForPath", { path: authStore.apiKeyInfo?.basic_path || "/" }) }}
+            </span>
           </div>
         </div>
 
+        <!-- 目录列表 -->
         <DirectoryList
-            v-else
-            :items="directoryData?.items || []"
-            :loading="loading"
-            :is-virtual="directoryData?.isVirtual"
-            :dark-mode="darkMode"
-            :view-mode="viewMode"
-            :is-checkbox-mode="isCheckboxMode"
-            :selected-items="selectedItems"
-            @navigate="navigateTo"
-            @download="handleDownload"
-            @rename="handleRename"
-            @delete="handleDelete"
-            @preview="handlePreview"
-            @item-select="handleItemSelect"
-            @toggle-select-all="toggleSelectAll"
+          v-else
+          :items="directoryItems"
+          :loading="loading"
+          :is-virtual="isVirtualDirectory"
+          :dark-mode="darkMode"
+          :view-mode="viewMode"
+          :is-checkbox-mode="isCheckboxMode"
+          :selected-items="getSelectedItems()"
+          :current-path="currentPath"
+          @navigate="handleNavigate"
+          @download="handleDownload"
+          @getLink="handleGetLink"
+          @rename="handleRename"
+          @delete="handleDelete"
+          @preview="handlePreview"
+          @item-select="handleItemSelect"
+          @toggle-select-all="toggleSelectAll"
+          @show-message="handleShowMessage"
         />
       </div>
 
@@ -135,9 +245,9 @@
           <!-- 返回按钮 -->
           <div class="mb-4">
             <button
-                @click="closePreviewWithUrl"
-                class="inline-flex items-center px-3 py-1.5 rounded-md transition-colors text-sm font-medium"
-                :class="darkMode ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-200 hover:bg-gray-300 text-gray-700'"
+              @click="closePreviewWithUrl"
+              class="inline-flex items-center px-3 py-1.5 rounded-md transition-colors text-sm font-medium"
+              :class="darkMode ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-200 hover:bg-gray-300 text-gray-700'"
             >
               <svg class="w-4 h-4 mr-1.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -148,13 +258,16 @@
 
           <!-- 文件预览内容 -->
           <FilePreview
-              :file="previewFile"
-              :dark-mode="darkMode"
-              :is-admin="isAdmin"
-              :is-loading="isPreviewLoading"
-              @download="handleDownload"
-              @loaded="handlePreviewLoaded"
-              @error="handlePreviewError"
+            :file="previewInfo || previewFile"
+            :dark-mode="darkMode"
+            :is-loading="isPreviewLoading"
+            :is-admin="authStore.isAdmin"
+            :api-key-info="authStore.apiKeyInfo"
+            :has-file-permission="authStore.hasFilePermission"
+            :directory-items="directoryItems"
+            @download="handleDownload"
+            @loaded="handlePreviewLoaded"
+            @error="handlePreviewError"
           />
         </div>
       </div>
@@ -163,197 +276,412 @@
 </template>
 
 <script setup>
-import { ref, computed, inject, watch, onMounted } from "vue";
-import { useRouter, useRoute } from "vue-router";
+import { ref, inject, watch, onMounted, onBeforeUnmount } from "vue";
+import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
+import { storeToRefs } from "pinia";
+
+// 组合式函数 - 使用统一聚合导出
+import { useSelection, useFilePreview, useFileOperations, useUIState, useFileBasket } from "../../composables/index.js";
+
+// Store
+import { useAuthStore } from "../../stores/authStore.js";
+import { useFileSystemStore } from "../../stores/fileSystemStore.js";
+
+// 子组件 - 更新为新的组件结构路径
+import BreadcrumbNav from "./shared/BreadcrumbNav.vue";
+import DirectoryList from "./directory/DirectoryList.vue";
+import FileOperations from "./shared/FileOperations.vue";
+import FilePreview from "./preview/FilePreview.vue";
+import UploadModal from "./shared/modals/UploadModal.vue";
+import CopyModal from "./shared/modals/CopyModal.vue";
+import TasksModal from "./shared/modals/TasksModal.vue";
 
 const { t } = useI18n();
-const router = useRouter();
 const route = useRoute();
 
 // 从父组件注入的数据
 const darkMode = inject("darkMode");
-const isAdmin = inject("isAdmin");
-const apiKeyInfo = inject("apiKeyInfo");
-const hasPermissionForCurrentPath = inject("hasPermissionForCurrentPath");
 
-// 导入子组件
-import BreadcrumbNav from "./BreadcrumbNav.vue";
-import DirectoryList from "./DirectoryList.vue";
-import FileOperations from "./FileOperations.vue";
-import FilePreview from "./FilePreview.vue";
-import UploadModal from "./UploadModal.vue";
-import CopyModal from "./CopyModal.vue";
-import TasksModal from "./TasksModal.vue";
+// 使用Store和组合式函数
+const fileSystemStore = useFileSystemStore();
+const selection = useSelection();
+const filePreview = useFilePreview();
+const fileOperations = useFileOperations();
+const authStore = useAuthStore();
 
-// 导入工具函数
-import { api } from "../../api";
-import { downloadFileWithAuth } from "../../utils/fileUtils";
+// 使用新的组合式函数
+const uiState = useUIState();
+const fileBasket = useFileBasket();
 
-// 数据状态
-const currentPath = ref("/");
-const directoryData = ref(null);
-const loading = ref(false);
-const message = ref(null);
-const viewMode = ref("list");
+// 使用storeToRefs解构响应式状态
+const { currentPath, loading, error, hasPermissionForCurrentPath, directoryItems, isVirtualDirectory } = storeToRefs(fileSystemStore);
 
-// 文件预览状态
-const previewFile = ref(null);
-const isPreviewMode = ref(false);
-const isPreviewLoading = ref(false);
+// 解构方法（方法不需要storeToRefs）
+const { refreshDirectory, navigateTo, initializeFromRoute, updateUrl } = fileSystemStore;
 
-// 弹窗状态
-const showUploadModal = ref(false);
-const showCopyModal = ref(false);
-const showTasksModal = ref(false);
+const { isCheckboxMode, selectedItems, selectedCount, setAvailableItems, toggleCheckboxMode, toggleSelectAll, getSelectedItems } = selection;
 
-// 选择状态
-const isCheckboxMode = ref(false);
-const selectedItems = ref([]);
+const { previewFile, previewInfo, isPreviewMode, isLoading: isPreviewLoading, updatePreviewUrl, stopPreview, initPreviewFromRoute } = filePreview;
+
+// 解构新的组合式函数状态和方法
+const {
+  // 消息管理
+  message,
+  showMessage,
+  // 视图模式管理
+  viewMode,
+  setViewMode,
+  // 弹窗状态管理
+  isUploadModalOpen,
+  isCopyModalOpen,
+  isTasksModalOpen,
+
+  openUploadModal,
+  closeUploadModal,
+  openCopyModal,
+  closeCopyModal,
+  openTasksModal,
+  closeTasksModal,
+} = uiState;
+
+const showDeleteDialog = ref(false);
+const itemsToDelete = ref([]);
+const isDeleting = ref(false);
 
 // 计算属性
-const selectedCount = computed(() => selectedItems.value.length);
 
-// 从路由参数获取路径
-const getPathFromRoute = () => {
-  if (route.params.pathMatch) {
-    const pathArray = Array.isArray(route.params.pathMatch) ? route.params.pathMatch : [route.params.pathMatch];
-    const urlPath = "/" + pathArray.join("/");
-    return urlPath.endsWith("/") ? urlPath : urlPath + "/";
-  }
-  return "/";
-};
+// 事件处理函数
 
-// 初始化路径
-const initializePath = () => {
-  const urlPath = getPathFromRoute();
-
-  if (!isAdmin.value && apiKeyInfo.value) {
-    const basicPath = apiKeyInfo.value.basic_path || "/";
-    const normalizedBasicPath = basicPath === "/" ? "/" : basicPath.replace(/\/+$/, "");
-    const normalizedUrlPath = urlPath.replace(/\/+$/, "") || "/";
-
-    if (normalizedBasicPath !== "/" && normalizedUrlPath !== normalizedBasicPath && !normalizedUrlPath.startsWith(normalizedBasicPath + "/")) {
-      console.log("URL路径超出权限范围，重定向到基本路径:", basicPath);
-      navigateTo(basicPath);
-      return;
-    }
-  }
-
-  currentPath.value = urlPath;
-};
-
-// 加载目录内容
-const loadDirectoryContents = async () => {
-  try {
-    loading.value = true;
-    const getDirectoryList = isAdmin.value ? api.fs.getAdminDirectoryList : api.fs.getUserDirectoryList;
-    const response = await getDirectoryList(currentPath.value);
-
-    if (response.success) {
-      directoryData.value = response.data;
-    } else {
-      showMessage("error", t("mount.messages.getDirectoryContentFailed", { message: response.message }));
-    }
-  } catch (error) {
-    console.error("加载目录内容错误:", error);
-    showMessage("error", t("mount.messages.getDirectoryContentFailedUnknown", { message: error.message || t("common.unknown") }));
-  } finally {
-    loading.value = false;
-  }
-};
-
-// 导航到指定路径
-const navigateTo = (path) => {
-  if (isPreviewMode.value) {
-    closePreview();
-  }
-
-  currentPath.value = path;
-  updateUrl(path);
-  loadDirectoryContents();
-  window.scrollTo({ top: 0, behavior: "smooth" });
-};
-
-// 更新URL
-const updateUrl = (path, previewFileName = null) => {
-  const normalizedPath = path.replace(/\/+$/, "") || "/";
-  const query = {};
-
+/**
+ * 处理导航
+ */
+const handleNavigate = async (path, previewFileName = null) => {
   if (previewFileName) {
-    query.preview = previewFileName;
-  }
-
-  let routeObject;
-  if (normalizedPath === "/") {
-    routeObject = { path: "/mount-explorer", query };
+    // 如果有预览文件，使用updateUrl
+    updateUrl(path, previewFileName);
   } else {
-    const pathSegments = normalizedPath
-        .replace(/^\/+/, "")
-        .split("/")
-        .filter((segment) => segment);
-    routeObject = { path: `/mount-explorer/${pathSegments.join("/")}`, query };
+    // 否则使用navigateTo
+    await navigateTo(path);
+  }
+};
+
+/**
+ * 处理刷新
+ */
+const handleRefresh = async () => {
+  // 对于API密钥用户，先重新验证认证状态
+  if (!authStore.isAdmin && authStore.authType === "apikey") {
+    try {
+      // 重新验证认证状态，这会更新API密钥信息
+      await authStore.validateAuth();
+
+      // 检查当前路径是否在新的基础路径权限范围内
+      const newBasicPath = authStore.userInfo.basicPath || "/";
+      const normalizedNewBasicPath = newBasicPath === "/" ? "/" : newBasicPath.replace(/\/+$/, "");
+      const normalizedCurrentPath = currentPath.value.replace(/\/+$/, "") || "/";
+
+      // 如果新的基础路径不是根路径，且当前路径不在新基础路径范围内，则需要重定向
+      if (normalizedNewBasicPath !== "/" && normalizedCurrentPath !== normalizedNewBasicPath && !normalizedCurrentPath.startsWith(normalizedNewBasicPath + "/")) {
+        console.log("检测到当前路径超出新的基础路径权限范围，导航到新的基本路径:", newBasicPath);
+        console.log("当前路径:", normalizedCurrentPath, "新基础路径:", normalizedNewBasicPath);
+        await navigateTo(newBasicPath);
+        return;
+      }
+      showMessage("success", t("mount.messages.apiKeyInfoUpdated"));
+    } catch (error) {
+      console.error("刷新认证状态失败:", error);
+    }
+  } else {
+    showMessage("success", t("mount.messages.refreshSuccess"));
   }
 
-  router.replace(routeObject);
+  await refreshDirectory();
 };
 
-// 显示消息
-const showMessage = (type, content) => {
-  message.value = { type, content };
-  setTimeout(() => {
-    message.value = null;
-  }, 4000);
-};
-
-// 处理视图模式切换
+/**
+ * 处理视图模式切换
+ */
 const handleViewModeChange = (mode) => {
-  viewMode.value = mode;
+  setViewMode(mode);
   localStorage.setItem("file_explorer_view_mode", mode);
 };
 
-// 文件预览相关方法
-const handlePreview = async (item) => {
-  if (!item || item.isDirectory) return;
+/**
+ * 处理文件夹创建
+ */
+const handleCreateFolder = async ({ name, path }) => {
+  if (!name || !path) return;
 
-  try {
-    isPreviewLoading.value = true; // 开始加载预览内容
+  // 使用fileOperations创建文件夹，传递正确的参数
+  const result = await fileOperations.createFolder(path, name);
 
-    // 获取详细的文件信息
-    const getFileInfo = isAdmin.value ? api.fs.getAdminFileInfo : api.fs.getUserFileInfo;
-    const response = await getFileInfo(item.path);
-
-    if (!response.success) {
-      throw new Error(response.message || "获取文件信息失败");
-    }
-
-    // 使用获取到的详细文件信息
-    const fileInfo = response.data;
-
-    // 先设置预览模式和文件信息
-    isPreviewMode.value = true; // 切换到预览模式
-    previewFile.value = fileInfo;
-
-    // 更新 URL 以包含预览文件信息
-    updateUrl(currentPath.value, fileInfo.name);
-
-    // 滚动到顶部
-    window.scrollTo({ top: 0, behavior: "smooth" });
-
-    // 预览内容加载完成（文件信息已加载，具体内容由 FilePreview 组件异步加载）
-    isPreviewLoading.value = false;
-  } catch (error) {
-    console.error("预览文件错误:", error);
-    showMessage("error", t("mount.messages.previewLoadFailedUnknown", { message: error.message || t("common.unknown") }));
-    isPreviewMode.value = false; // 出错时不进入预览模式
-    previewFile.value = null;
-    isPreviewLoading.value = false;
+  if (result.success) {
+    showMessage("success", result.message);
+    // 重新加载当前目录内容
+    await refreshDirectory();
+  } else {
+    showMessage("error", result.message);
   }
 };
 
+/**
+ * 处理文件下载
+ */
+const handleDownload = async (item) => {
+  const result = await fileOperations.downloadFile(item);
+
+  if (result.success) {
+    showMessage("success", result.message);
+  } else {
+    showMessage("error", result.message);
+  }
+};
+
+/**
+ * 处理获取文件链接
+ */
+const handleGetLink = async (item) => {
+  const result = await fileOperations.getFileLink(item);
+
+  if (result.success) {
+    showMessage("success", result.message);
+  } else {
+    showMessage("error", result.message);
+  }
+};
+
+/**
+ * 处理文件预览
+ */
+const handlePreview = async (item) => {
+  if (!item || item.isDirectory) return;
+
+  // 只更新URL，让路由监听器处理实际的文件加载
+  updatePreviewUrl(currentPath.value, item.name);
+
+  // 滚动到顶部
+  window.scrollTo({ top: 0, behavior: "smooth" });
+};
+
+/**
+ * 处理文件删除（显示确认对话框）
+ */
+const handleDelete = (item) => {
+  itemsToDelete.value = [item];
+  showDeleteDialog.value = true;
+};
+
+/**
+ * 处理文件重命名
+ */
+const handleRename = async ({ item, newName }) => {
+  if (!item || !newName || !newName.trim()) return;
+
+  // 构建新路径
+  const parentPath = item.path.substring(0, item.path.lastIndexOf("/") + 1);
+  const isDirectory = item.isDirectory;
+  const oldPath = item.path;
+  let newPath = parentPath + newName.trim();
+
+  // 如果是目录，确保新路径末尾有斜杠
+  if (isDirectory && !newPath.endsWith("/")) {
+    newPath += "/";
+  }
+
+  // 使用fileOperations重命名
+  const result = await fileOperations.renameItem(oldPath, newPath);
+
+  if (result.success) {
+    showMessage("success", result.message);
+    // 重新加载当前目录内容
+    await refreshDirectory();
+  } else {
+    showMessage("error", result.message);
+  }
+};
+
+/**
+ * 处理项目选择
+ */
+const handleItemSelect = (item, selected) => {
+  selection.selectItem(item, selected);
+};
+
+/**
+ * 批量删除（显示确认对话框）
+ */
+const batchDelete = () => {
+  const selectedItems = selection.getSelectedItems();
+
+  if (selectedItems.length === 0) {
+    showMessage("warning", t("mount.messages.noItemsSelected"));
+    return;
+  }
+
+  itemsToDelete.value = selectedItems;
+  showDeleteDialog.value = true;
+};
+
+/**
+ * 取消删除
+ */
+const cancelDelete = () => {
+  // 删除过程中不允许取消
+  if (isDeleting.value) return;
+
+  showDeleteDialog.value = false;
+  itemsToDelete.value = [];
+};
+
+/**
+ * 确认删除
+ */
+const confirmDelete = async () => {
+  if (itemsToDelete.value.length === 0 || isDeleting.value) return;
+
+  isDeleting.value = true;
+
+  try {
+    // 使用fileOperations删除项目
+    const result = await fileOperations.batchDeleteItems(itemsToDelete.value);
+
+    if (result.success) {
+      showMessage("success", result.message);
+
+      // 如果是批量删除，清空选择状态
+      if (itemsToDelete.value.length > 1) {
+        toggleCheckboxMode(false);
+      }
+
+      // 关闭对话框
+      showDeleteDialog.value = false;
+      itemsToDelete.value = [];
+
+      // 重新加载当前目录内容
+      await refreshDirectory();
+    } else {
+      showMessage("error", result.message);
+    }
+  } catch (error) {
+    console.error("删除操作失败:", error);
+    showMessage("error", error.message || t("mount.messages.deleteFailed", { message: t("common.unknown") }));
+  } finally {
+    isDeleting.value = false;
+  }
+};
+
+/**
+ * 处理批量复制
+ */
+const handleBatchCopy = () => {
+  const selectedItems = selection.getSelectedItems();
+
+  if (selectedItems.length === 0) {
+    showMessage("warning", t("mount.messages.noItemsSelected"));
+    return;
+  }
+
+  openCopyModal();
+};
+
+// 弹窗事件处理函数
+const handleOpenUploadModal = () => {
+  openUploadModal();
+};
+const handleCloseUploadModal = () => {
+  closeUploadModal();
+};
+const handleCloseCopyModal = () => {
+  closeCopyModal();
+};
+const handleOpenTasksModal = () => {
+  openTasksModal();
+};
+const handleCloseTasksModal = () => {
+  closeTasksModal();
+};
+
+// 上传成功处理
+const handleUploadSuccess = async () => {
+  await refreshDirectory();
+  showMessage("success", t("mount.messages.uploadSuccess"));
+};
+
+// 上传错误处理
+const handleUploadError = (error) => {
+  console.error("上传失败:", error);
+  showMessage("error", t("mount.messages.uploadFailed", { message: error.message || t("common.unknown") }));
+};
+
+// 复制完成处理
+const handleCopyComplete = (event) => {
+  // 使用事件中的消息，如果没有则使用默认消息
+  const message = event?.message || t("mount.messages.copySuccess", { message: t("mount.taskManager.copyStarted", { count: 0, path: "" }) });
+  showMessage("success", message);
+  toggleCheckboxMode(false);
+
+  // 只有在模态框未关闭时才关闭模态框
+  if (!event?.modalAlreadyClosed) {
+    closeCopyModal();
+  }
+
+  refreshDirectory();
+};
+
+// ===== 文件篮相关事件处理 =====
+
+/**
+ * 处理批量添加到文件篮
+ */
+const handleBatchAddToBasket = () => {
+  try {
+    const selectedFiles = getSelectedItems();
+    const result = fileBasket.addSelectedToBasket(selectedFiles, currentPath.value);
+
+    if (result.success) {
+      showMessage("success", result.message);
+      // 可选：关闭勾选模式
+      // toggleCheckboxMode(false);
+    } else {
+      showMessage("error", result.message);
+    }
+  } catch (error) {
+    console.error("批量添加到文件篮失败:", error);
+    showMessage("error", t("fileBasket.messages.batchAddFailed"));
+  }
+};
+
+/**
+ * 处理任务创建事件
+ */
+const handleTaskCreated = (taskInfo) => {
+  console.log("文件篮任务已创建:", taskInfo);
+  // 可以在这里添加额外的任务跟踪逻辑
+  // 例如：打开任务管理器面板
+  // openTasksModal();
+};
+
+/**
+ * 处理消息显示事件
+ */
+const handleShowMessage = (messageInfo) => {
+  showMessage(messageInfo.type, messageInfo.message);
+};
+
+// 预览相关事件处理
+const handlePreviewLoaded = () => {
+  console.log("预览加载完成");
+};
+
+const handlePreviewError = (error) => {
+  console.error("预览加载失败:", error);
+  showMessage("error", t("mount.messages.previewError"));
+};
+
+// 关闭预览
 const closePreview = () => {
-  previewFile.value = null;
-  isPreviewMode.value = false;
+  stopPreview(false); // 不自动更新URL
 };
 
 const closePreviewWithUrl = () => {
@@ -361,388 +689,209 @@ const closePreviewWithUrl = () => {
   updateUrl(currentPath.value);
 };
 
-// 文件上传处理
-const handleUpload = async ({ file, path }) => {
-  if (!file || !path) return;
-
-  try {
-    // 显示上传中状态
-    loading.value = true;
-    showMessage("info", `正在上传 ${file.name}...`);
-
-    // 根据用户类型选择合适的API函数
-    const uploadFile = isAdmin.value ? api.fs.uploadAdminFile : api.fs.uploadUserFile;
-
-    // 判断上传文件大小，5MB以下使用普通上传，否则使用分片上传
-    const MULTIPART_THRESHOLD = 5 * 1024 * 1024; // 5MB
-    let response;
-
-    if (file.size <= MULTIPART_THRESHOLD) {
-      // 小文件：使用普通上传
-      response = await uploadFile(path, file);
-    } else {
-      // 大文件：使用分片上传
-      console.log(`文件大小(${file.size}字节)超过阈值(${MULTIPART_THRESHOLD}字节)，使用分片上传`);
-      response = await api.fs.performMultipartUpload(file, path, isAdmin.value);
-    }
-
-    // 检查响应状态
-    if (response.success) {
-      showMessage("success", t("mount.messages.fileUploadSuccess"));
-      // 重新加载当前目录内容
-      loadDirectoryContents();
-    } else {
-      showMessage("error", t("mount.messages.fileUploadFailed", { message: response.message }));
-    }
-  } catch (error) {
-    console.error("文件上传错误:", error);
-    showMessage("error", t("mount.messages.fileUploadFailedUnknown", { message: error.message || t("common.unknown") }));
-  } finally {
-    loading.value = false;
-  }
-};
-
-// 创建文件夹处理
-const handleCreateFolder = async ({ name, path }) => {
-  if (!name || !path) return;
-
-  try {
-    loading.value = true;
-
-    // 构建完整路径
-    const folderPath = path.endsWith("/") ? `${path}${name}/` : `${path}/${name}/`;
-
-    // 根据用户类型选择合适的API函数
-    const createDirectory = isAdmin.value ? api.fs.createAdminDirectory : api.fs.createUserDirectory;
-
-    const response = await createDirectory(folderPath);
-
-    // 检查响应状态
-    if (response.success) {
-      showMessage("success", t("mount.messages.folderCreateSuccess"));
-      // 重新加载当前目录内容
-      loadDirectoryContents();
-    } else {
-      showMessage("error", t("mount.messages.folderCreateFailed", { message: response.message }));
-    }
-  } catch (error) {
-    console.error("创建文件夹错误:", error);
-    showMessage("error", t("mount.messages.folderCreateFailedUnknown", { message: error.message || t("common.unknown") }));
-  } finally {
-    loading.value = false;
-  }
-};
-
-// 刷新目录
-const handleRefresh = async () => {
-  // 对于API密钥用户，先刷新API密钥信息
-  if (!isAdmin.value && localStorage.getItem("api_key")) {
-    try {
-      const response = await api.user.auth.getApiKeyInfo();
-      if (response.success && response.data) {
-        // 检查基本路径是否发生变化
-        const newBasicPath = response.data.basic_path || "/";
-        const currentBasicPath = currentPath.value.replace(/\/+$/, "") || "/";
-
-        if (newBasicPath !== "/" && !currentBasicPath.startsWith(newBasicPath.replace(/\/+$/, ""))) {
-          console.log("检测到基本路径变化，导航到新的基本路径:", newBasicPath);
-          navigateTo(newBasicPath);
-          return;
-        }
-        showMessage("success", t("mount.messages.apiKeyInfoUpdated"));
-      }
-    } catch (error) {
-      console.error("刷新API密钥信息失败:", error);
-    }
-  } else {
-    showMessage("success", t("mount.messages.refreshSuccess"));
-  }
-
-  loadDirectoryContents();
-};
-
-// 弹窗处理
-const handleOpenUploadModal = () => {
-  showUploadModal.value = true;
-};
-const handleCloseUploadModal = () => {
-  showUploadModal.value = false;
-};
-const handleUploadSuccess = () => {
-  showMessage("success", t("mount.messages.uploadSuccess"));
-  loadDirectoryContents();
-};
-const handleUploadError = (error) => {
-  showMessage("error", t("mount.messages.uploadFailed", { message: error.message || t("common.unknown") }));
-};
-
-const handleBatchCopy = () => {
-  if (selectedItems.value.length === 0) {
-    showMessage("warning", t("mount.messages.noItemsSelected"));
-    return;
-  }
-  showCopyModal.value = true;
-};
-const handleCloseCopyModal = () => {
-  showCopyModal.value = false;
-};
-const handleCopyComplete = () => {
-  showMessage("success", t("mount.messages.copySuccess"));
-  selectedItems.value = [];
-  isCheckboxMode.value = false;
-  loadDirectoryContents();
-};
-
-const handleOpenTasksModal = () => {
-  showTasksModal.value = true;
-};
-const handleCloseTasksModal = () => {
-  showTasksModal.value = false;
-};
-
-// 文件操作处理
-const handleDownload = async (item) => {
-  try {
-    await downloadFileWithAuth(item.path, item.name);
-    showMessage("success", t("mount.messages.downloadStarted", { name: item.name }));
-  } catch (error) {
-    console.error("下载文件错误:", error);
-    showMessage("error", t("mount.messages.downloadFailed", { message: error.message }));
-  }
-};
-
-const handleRename = async ({ item, newName }) => {
-  try {
-    const renameItem = isAdmin.value ? api.fs.renameAdminItem : api.fs.renameUserItem;
-
-    // 构建新路径
-    const parentPath = item.path.substring(0, item.path.lastIndexOf("/") + 1);
-    const isDirectory = item.isDirectory;
-    const oldPath = item.path;
-    let newPath = parentPath + newName;
-
-    // 如果是目录，确保新路径末尾有斜杠
-    if (isDirectory && !newPath.endsWith("/")) {
-      newPath += "/";
-    }
-
-    const response = await renameItem(oldPath, newPath);
-
-    if (response.success) {
-      showMessage("success", t("mount.messages.renameSuccess", { oldName: item.name, newName }));
-      loadDirectoryContents();
-    } else {
-      showMessage("error", t("mount.messages.renameFailed", { message: response.message }));
-    }
-  } catch (error) {
-    console.error("重命名错误:", error);
-    showMessage("error", t("mount.messages.renameFailedUnknown", { message: error.message }));
-  }
-};
-
-const handleDelete = async (item) => {
-  // DirectoryList组件已经处理了确认对话框，这里直接执行删除
-  try {
-    const deleteItem = isAdmin.value ? api.fs.deleteAdminItem : api.fs.deleteUserItem;
-    const response = await deleteItem(item.path);
-
-    if (response.success) {
-      showMessage("success", t("mount.messages.deleteSuccess", { name: item.name }));
-      loadDirectoryContents();
-    } else {
-      showMessage("error", t("mount.messages.deleteFailed", { message: response.message }));
-    }
-  } catch (error) {
-    console.error("删除错误:", error);
-    showMessage("error", t("mount.messages.deleteFailedUnknown", { message: error.message }));
-  }
-};
-
-// 选择处理
-const handleItemSelect = (item, selected) => {
-  if (selected) {
-    if (!selectedItems.value.find((i) => i.path === item.path)) {
-      selectedItems.value.push(item);
-    }
-  } else {
-    selectedItems.value = selectedItems.value.filter((i) => i.path !== item.path);
-  }
-};
-
-const toggleSelectAll = (selectAll) => {
-  if (selectAll) {
-    selectedItems.value = [...(directoryData.value?.items || [])];
-  } else {
-    selectedItems.value = [];
-  }
-};
-
-const toggleCheckboxMode = () => {
-  isCheckboxMode.value = !isCheckboxMode.value;
-  if (!isCheckboxMode.value) {
-    selectedItems.value = [];
-  }
-};
-
-const batchDelete = async () => {
-  if (selectedItems.value.length === 0) {
-    showMessage("warning", t("mount.messages.noItemsSelected"));
-    return;
-  }
-
-  if (!confirm(t("mount.messages.confirmBatchDelete", { count: selectedItems.value.length }))) {
-    return;
-  }
-
-  try {
-    const deleteItem = isAdmin.value ? api.fs.deleteAdminItem : api.fs.deleteUserItem;
-    const promises = selectedItems.value.map((item) => deleteItem(item.path));
-    await Promise.all(promises);
-
-    showMessage("success", t("mount.messages.batchDeleteSuccess", { count: selectedItems.value.length }));
-    selectedItems.value = [];
-    isCheckboxMode.value = false;
-    loadDirectoryContents();
-  } catch (error) {
-    console.error("批量删除错误:", error);
-    showMessage("error", t("mount.messages.batchDeleteFailed", { message: error.message }));
-  }
-};
-
-const handlePreviewLoaded = () => {
-  isPreviewLoading.value = false;
-};
-
-// 处理预览内容加载错误
-const handlePreviewError = () => {
-  isPreviewLoading.value = false;
-  showMessage("error", t("mount.messages.previewError"));
-};
-
-// 从 URL 初始化预览状态
-const initializePreviewFromUrl = async () => {
-  if (!route.query.preview) {
-    return;
-  }
-
-  try {
-    // 构建完整的文件路径
-    let filePath;
-    if (currentPath.value === "/") {
-      filePath = "/" + route.query.preview;
-    } else {
-      const normalizedPath = currentPath.value.replace(/\/+$/, "");
-      filePath = normalizedPath + "/" + route.query.preview;
-    }
-
-    // 检查权限：对于 API 密钥用户，验证文件路径是否在权限范围内
-    if (!isAdmin.value && apiKeyInfo.value) {
-      const basicPath = apiKeyInfo.value.basic_path || "/";
-      const normalizedBasicPath = basicPath === "/" ? "/" : basicPath.replace(/\/+$/, "");
-
-      // 获取文件所在目录
-      const fileDir = filePath.substring(0, filePath.lastIndexOf("/")) || "/";
-      const normalizedFileDir = fileDir.replace(/\/+$/, "") || "/";
-
-      if (normalizedBasicPath !== "/" && normalizedFileDir !== normalizedBasicPath && !normalizedFileDir.startsWith(normalizedBasicPath + "/")) {
-        console.warn("文件超出权限范围:", filePath);
-        updateUrl(currentPath.value);
-        return;
-      }
-    }
-
-    // 获取文件信息
-    const getFileInfo = isAdmin.value ? api.fs.getAdminFileInfo : api.fs.getUserFileInfo;
-    const response = await getFileInfo(filePath);
-
-    if (response.success) {
-      previewFile.value = response.data;
-      isPreviewMode.value = true;
-      console.log("文件预览初始化成功:", response.data.name);
-    } else {
-      console.warn("无法加载预览文件:", response.message);
-      // 如果文件不存在，清除 URL 中的预览参数
-      updateUrl(currentPath.value);
-    }
-  } catch (error) {
-    console.error("初始化文件预览失败:", error);
-    // 如果出错，清除 URL 中的预览参数
-    updateUrl(currentPath.value);
-  }
-};
-
-// 监听权限状态变化，当权限检查完成后再初始化
+// 监听目录项目变化，更新选择状态
 watch(
-    [isAdmin, apiKeyInfo],
-    ([newIsAdmin, newApiKeyInfo], [oldIsAdmin, oldApiKeyInfo]) => {
-      // 第一次调用或权限信息真正变化时才初始化
-      const isFirstCall = oldIsAdmin === undefined && oldApiKeyInfo === undefined;
-      const hasChanged = newIsAdmin !== oldIsAdmin || JSON.stringify(newApiKeyInfo) !== JSON.stringify(oldApiKeyInfo);
-
-      if (isFirstCall || hasChanged) {
-        initializePath();
-        loadDirectoryContents().then(() => {
-          // 检查是否需要初始化预览
-          if (route.query.preview) {
-            initializePreviewFromUrl();
-          }
-        });
-      }
-    },
-    { immediate: true }
+  () => directoryItems.value,
+  (newItems) => {
+    setAvailableItems(newItems);
+  },
+  { immediate: true }
 );
 
-// 在权限信息稳定后，监听路由变化
-watch(
-    () => [route.params.pathMatch, route.query.preview],
-    ([newPathMatch, newPreviewFile], oldValues) => {
-      // 处理第一次调用时oldValues为undefined的情况
-      const [oldPathMatch, oldPreviewFile] = oldValues || [undefined, undefined];
+/**
+ * 处理目录变化 - 需要重新加载目录
+ */
+const handleDirectoryChange = async () => {
+  try {
+    await initializeFromRoute();
+  } catch (error) {
+    console.error("目录变化处理失败:", error);
+    showMessage("error", "页面加载失败");
+  }
+};
 
-      // 确保权限信息已经加载（isAdmin为boolean，apiKeyInfo为null或object）
-      if (typeof isAdmin.value === "boolean") {
-        // 如果路径发生变化
-        if (newPathMatch !== oldPathMatch) {
-          initializePath();
-          loadDirectoryContents().then(() => {
-            // 路径变化后，检查是否需要初始化预览
-            if (newPreviewFile) {
-              initializePreviewFromUrl();
-            }
-          });
-        }
-        // 如果只是预览文件发生变化
-        else if (newPreviewFile !== oldPreviewFile) {
-          if (newPreviewFile) {
-            initializePreviewFromUrl();
-          } else {
-            // 清除预览状态
-            closePreview();
+/**
+ * 处理预览变化 - 只需要初始化预览
+ */
+const handlePreviewChange = async () => {
+  try {
+    await initPreviewFromRoute(currentPath.value, directoryItems.value);
+  } catch (error) {
+    console.error("预览变化处理失败:", error);
+    showMessage("error", "预览加载失败");
+  }
+};
+
+// ===== 状态监听器系统 =====
+
+/**
+ * 创建认证状态比较器
+ */
+const createAuthStateComparator = () => {
+  let previousAuthState = null;
+
+  return (currentAuth) => {
+    const currentState = {
+      isAdmin: currentAuth.isAdmin,
+      // 只比较关键的apiKeyInfo属性，避免深度序列化
+      apiKeyId: currentAuth.apiKeyInfo?.id || null,
+      basicPath: currentAuth.apiKeyInfo?.basic_path || null,
+      permissions: currentAuth.apiKeyInfo?.permissions
+        ? {
+            text: !!currentAuth.apiKeyInfo.permissions.text,
+            file: !!currentAuth.apiKeyInfo.permissions.file,
+            mount: !!currentAuth.apiKeyInfo.permissions.mount,
           }
-        }
+        : null,
+    };
+
+    // 首次调用
+    if (!previousAuthState) {
+      previousAuthState = { ...currentState };
+      return { changed: true, isFirstCall: true, changes: ["initial"] };
+    }
+
+    // 精确比较关键属性
+    const changes = [];
+    if (currentState.isAdmin !== previousAuthState.isAdmin) {
+      changes.push("isAdmin");
+    }
+    if (currentState.apiKeyId !== previousAuthState.apiKeyId) {
+      changes.push("apiKeyId");
+    }
+    if (currentState.basicPath !== previousAuthState.basicPath) {
+      changes.push("basicPath");
+    }
+
+    // 比较权限对象
+    const currentPerms = currentState.permissions;
+    const prevPerms = previousAuthState.permissions;
+    if (JSON.stringify(currentPerms) !== JSON.stringify(prevPerms)) {
+      changes.push("permissions");
+    }
+
+    const hasChanges = changes.length > 0;
+    if (hasChanges) {
+      previousAuthState = { ...currentState };
+    }
+
+    return {
+      changed: hasChanges,
+      isFirstCall: false,
+      changes,
+    };
+  };
+};
+
+/**
+ * 创建异步处理队列，防止竞态条件
+ */
+const createAsyncProcessor = () => {
+  let isProcessing = false;
+  let pendingOperation = null;
+
+  return async (operation) => {
+    // 如果正在处理，记录待处理操作
+    if (isProcessing) {
+      pendingOperation = operation;
+      return;
+    }
+
+    isProcessing = true;
+
+    try {
+      await operation();
+
+      // 处理待处理的操作
+      if (pendingOperation) {
+        const nextOperation = pendingOperation;
+        pendingOperation = null;
+        await nextOperation();
       }
-    },
-    { immediate: false }
+    } catch (error) {
+      console.error("异步处理失败:", error);
+      showMessage("error", "页面加载失败，请刷新重试");
+    } finally {
+      isProcessing = false;
+    }
+  };
+};
+
+// 创建状态比较器和异步处理器实例
+const authComparator = createAuthStateComparator();
+const asyncProcessor = createAsyncProcessor();
+
+// 权限状态监听器 - 高性能版本
+watch(
+  () => ({ isAdmin: authStore.isAdmin, apiKeyInfo: authStore.apiKeyInfo }),
+  (newAuth) => {
+    const comparison = authComparator(newAuth);
+
+    if (comparison.changed) {
+      console.log("权限状态变化检测:", {
+        isFirstCall: comparison.isFirstCall,
+        changes: comparison.changes,
+        newAuth: {
+          isAdmin: newAuth.isAdmin,
+          apiKeyId: newAuth.apiKeyInfo?.id,
+          basicPath: newAuth.apiKeyInfo?.basic_path,
+        },
+      });
+
+      // 确保权限信息已经加载
+      if (typeof newAuth.isAdmin !== "boolean") {
+        console.log("等待权限信息加载...");
+        return;
+      }
+
+      // 使用异步处理器防止竞态条件
+      asyncProcessor(async () => {
+        await handleDirectoryChange();
+      });
+    }
+  },
+  { immediate: true }
+);
+
+// 路由路径监听器 - 独立处理
+watch(
+  () => route.params.pathMatch,
+  (newPath, oldPath) => {
+    if (newPath !== oldPath) {
+      asyncProcessor(async () => {
+        await handleDirectoryChange();
+      });
+    }
+  }
+);
+
+// 预览文件监听器 - 独立处理
+watch(
+  () => route.query.preview,
+  () => {
+    asyncProcessor(async () => {
+      await handlePreviewChange();
+    });
+  },
+  { immediate: true }
 );
 
 // 组件挂载时恢复视图首选项
 onMounted(() => {
   const savedViewMode = localStorage.getItem("file_explorer_view_mode");
   if (savedViewMode) {
-    viewMode.value = savedViewMode;
+    setViewMode(savedViewMode);
   }
 });
+
+// 组件卸载时清理资源
+onBeforeUnmount(() => {
+  console.log("MountExplorerMain组件卸载，清理资源");
+  // 停止预览
+  if (isPreviewMode.value) {
+    stopPreview(false);
+  }
+  // 清理选择状态
+  toggleCheckboxMode(false);
+});
 </script>
-
-<style scoped>
-.card {
-  border-radius: 0.5rem;
-  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  border-width: 1px;
-  border-style: solid;
-}
-
-.file-preview-container {
-  padding: 1rem;
-}
-</style>

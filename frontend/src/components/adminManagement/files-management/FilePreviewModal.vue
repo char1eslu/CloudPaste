@@ -116,9 +116,9 @@
             </div>
 
             <button
-                @click="$emit('close')"
-                class="px-4 py-2 rounded-md text-sm font-medium transition-colors"
-                :class="darkMode ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-200 hover:bg-gray-300 text-gray-700'"
+              @click="$emit('close')"
+              class="px-4 py-2 rounded-md text-sm font-medium transition-colors"
+              :class="darkMode ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-200 hover:bg-gray-300 text-gray-700'"
             >
               关闭
             </button>
@@ -130,9 +130,9 @@
 </template>
 
 <script setup>
-import { defineProps, defineEmits, computed, ref } from "vue";
-import { getFullApiUrl } from "../../../api/config.js";
-import { isOfficeFileType } from "../../file-view/FileViewUtils.js";
+import { defineProps, defineEmits, computed } from "vue";
+import { api } from "../../../api/index.js";
+import { isOffice as isOfficeFileType } from "../../../utils/mimeUtils.js";
 
 const props = defineProps({
   file: {
@@ -202,35 +202,16 @@ const getOfficePreviewUrl = async () => {
   if (!props.file.slug) return null;
 
   try {
-    // 构建API请求URL
-    let apiUrl = getFullApiUrl(`office-preview/${props.file.slug}`);
-
     // 获取文件密码
     const filePassword = getFilePassword();
 
-    // 添加密码参数(如果需要)
-    if (props.file.has_password && filePassword) {
-      apiUrl += `?password=${encodeURIComponent(filePassword)}`;
-    }
+    console.log("正在请求Office预览URL:", props.file.slug);
 
-    console.log("正在请求Office预览URL:", apiUrl);
-
-    // 发送请求获取直接URL
-    const response = await fetch(apiUrl);
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || "获取Office预览URL失败");
-    }
-
-    // 解析响应
-    const data = await response.json();
-    if (!data.url) {
-      throw new Error("无法获取Office预览URL");
-    }
-
-    // 生成Microsoft Office在线预览URL
-    const encodedUrl = encodeURIComponent(data.url);
-    return `https://view.officeapps.live.com/op/view.aspx?src=${encodedUrl}`;
+    // 使用统一的预览服务
+    return await api.preview.getOfficePreviewUrl(props.file.slug, {
+      password: filePassword,
+      provider: "microsoft",
+    });
   } catch (error) {
     console.error("获取Office预览URL出错:", error);
     alert(`预览失败: ${error.message}`);
@@ -238,19 +219,8 @@ const getOfficePreviewUrl = async () => {
   }
 };
 
-/**
- * 格式化文件大小
- * @param {number} bytes - 文件大小（字节）
- * @returns {string} 格式化后的文件大小
- */
-const formatFileSize = (bytes) => {
-  if (!bytes || bytes === 0) return "0 B";
-
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-
-  return parseFloat((bytes / Math.pow(1024, i)).toFixed(2)) + " " + sizes[i];
-};
+// 导入统一的工具函数
+import { formatFileSize, getRemainingViews as getRemainingViewsUtil } from "../../../utils/fileUtils.js";
 
 // 导入统一的时间处理工具
 import { formatDateTimeWithSeconds } from "../../../utils/timeUtils.js";
@@ -433,10 +403,8 @@ const expiresClass = computed(() => {
  * 计算剩余访问次数
  */
 const getRemainingViews = computed(() => {
-  if (!props.file.max_views || props.file.max_views === 0) return "无限制";
-  const viewCount = props.file.views || 0;
-  const remaining = props.file.max_views - viewCount;
-  return remaining <= 0 ? "已用完" : `${remaining} 次`;
+  const result = getRemainingViewsUtil(props.file); // 不传t函数，使用中文
+  return typeof result === "number" ? `${result} 次` : result;
 });
 
 /**

@@ -10,6 +10,11 @@ import { S3Client, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCom
 import { createS3Client } from "../utils/s3Utils.js";
 import { clearCache } from "../utils/DirectoryCache.js";
 import { getEnhancedUrlMetadata as getEnhancedMimeMetadata } from "../utils/enhancedMimeUtils.js";
+import { PermissionUtils } from "../utils/permissionUtils.js";
+import { normalizeS3SubPath } from "../storage/drivers/s3/utils/S3PathUtils.js";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { hashPassword } from "../utils/crypto.js";
+import { updateParentDirectoriesModifiedTimeHelper } from "../storage/drivers/s3/utils/S3DirectoryUtils.js";
 
 // 分片上传配置
 const DEFAULT_PART_SIZE = 5 * 1024 * 1024; // 5MB默认分片大小
@@ -434,8 +439,7 @@ export async function prepareUrlUpload(db, s3ConfigId, metadata, createdBy, encr
   if (options.authType === "apikey" && options.apiKeyInfo && options.apiKeyInfo.basicPath && options.apiKeyInfo.basicPath !== "/") {
     // 对于API密钥用户，检查权限并使用挂载点匹配逻辑来正确提取子路径
     // 获取API密钥可访问的挂载点
-    const { getAccessibleMountsByBasicPath } = await import("../services/apiKeyService.js");
-    const mounts = await getAccessibleMountsByBasicPath(db, options.apiKeyInfo.basicPath);
+    const mounts = await PermissionUtils.getAccessibleMounts(db, options.apiKeyInfo, "apiKey");
 
     // 检查当前S3配置是否在API密钥的权限范围内
     const hasPermission = mounts.some((mount) => mount.storage_config_id === s3Config.id);
@@ -464,7 +468,6 @@ export async function prepareUrlUpload(db, s3ConfigId, metadata, createdBy, encr
         }
 
         // 使用normalizeS3SubPath来规范化子路径
-        const { normalizeS3SubPath } = await import("../webdav/utils/webdavUtils.js");
         actualStoragePath = normalizeS3SubPath(subPath, s3Config, true);
         break;
       }
@@ -513,19 +516,13 @@ export async function prepareUrlUpload(db, s3ConfigId, metadata, createdBy, encr
   // 生成S3 URL
   const s3Url = buildS3Url(s3Config, storagePath);
 
-  // 生成预签名上传URL，适当延长有效期以便处理大文件
-  const uploadUrl = await generatePresignedPutUrl(
-      s3Config,
-      storagePath,
-      metadata.contentType,
-      encryptionSecret,
-      7200 // 2小时有效期，考虑到从远程URL下载可能需要较长时间
-  );
+  // 生成预签名上传URL，使用S3配置的默认时效
+  const uploadUrl = await generatePresignedPutUrl(s3Config, storagePath, metadata.contentType, encryptionSecret);
 
   // 创建文件记录
   await db
-      .prepare(
-          `
+    .prepare(
+      `
       INSERT INTO ${DbTables.FILES} (
         id, slug, filename, storage_path, s3_url,
         s3_config_id, mimetype, size, etag,
@@ -536,21 +533,21 @@ export async function prepareUrlUpload(db, s3ConfigId, metadata, createdBy, encr
         ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?
       )
     `
-      )
-      .bind(
-          fileId,
-          slug,
-          metadata.filename,
-          storagePath,
-          s3Url,
-          s3ConfigId,
-          metadata.contentType || "application/octet-stream",
-          metadata.size || 0, // 初始大小可能为0或来自元数据
-          null, // 初始ETag为null，在上传完成后更新
-          createdBy,
-          remark
-      )
-      .run();
+    )
+    .bind(
+      fileId,
+      slug,
+      metadata.filename,
+      storagePath,
+      s3Url,
+      s3ConfigId,
+      metadata.contentType || "application/octet-stream",
+      metadata.size || 0, // 初始大小可能为0或来自元数据
+      null, // 初始ETag为null，在上传完成后更新
+      createdBy,
+      remark
+    )
+    .run();
 
   // 返回上传信息
   return {
@@ -573,7 +570,6 @@ export async function prepareUrlUpload(db, s3ConfigId, metadata, createdBy, encr
  * @returns {Function} 签名函数
  */
 async function getSignatureFunction(s3Config) {
-  const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
   return getSignedUrl;
 }
 
@@ -633,8 +629,7 @@ export async function initializeMultipartUpload(db, url, s3ConfigId, metadata, c
   if (options.authType === "apikey" && options.apiKeyInfo && options.apiKeyInfo.basicPath && options.apiKeyInfo.basicPath !== "/") {
     // 对于API密钥用户，检查权限并使用挂载点匹配逻辑来正确提取子路径
     // 获取API密钥可访问的挂载点
-    const { getAccessibleMountsByBasicPath } = await import("../services/apiKeyService.js");
-    const mounts = await getAccessibleMountsByBasicPath(db, options.apiKeyInfo.basicPath);
+    const mounts = await PermissionUtils.getAccessibleMounts(db, options.apiKeyInfo, "apiKey");
 
     // 检查当前S3配置是否在API密钥的权限范围内
     const hasPermission = mounts.some((mount) => mount.storage_config_id === s3Config.id);
@@ -663,7 +658,6 @@ export async function initializeMultipartUpload(db, url, s3ConfigId, metadata, c
         }
 
         // 使用normalizeS3SubPath来规范化子路径
-        const { normalizeS3SubPath } = await import("../webdav/utils/webdavUtils.js");
         actualStoragePath = normalizeS3SubPath(subPath, s3Config, true);
         break;
       }
@@ -713,7 +707,6 @@ export async function initializeMultipartUpload(db, url, s3ConfigId, metadata, c
   let passwordHash = null;
   if (options.password) {
     // 使用与s3UploadRoutes相同的哈希方法
-    const { hashPassword } = await import("../utils/crypto.js");
     passwordHash = await hashPassword(options.password);
   }
 
@@ -773,8 +766,8 @@ export async function initializeMultipartUpload(db, url, s3ConfigId, metadata, c
         PartNumber: partNumber,
       });
 
-      // 生成预签名URL，有效期1小时
-      const presignedUrl = await getSignedUrl(s3Client, uploadPartCommand, { expiresIn: 3600 });
+      // 生成预签名URL，使用S3配置的默认时效
+      const presignedUrl = await getSignedUrl(s3Client, uploadPartCommand, { expiresIn: s3Config.signature_expires_in || 3600 });
 
       presignedUrls.push({
         partNumber: partNumber,
@@ -784,8 +777,8 @@ export async function initializeMultipartUpload(db, url, s3ConfigId, metadata, c
 
     // 创建文件记录
     await db
-        .prepare(
-            `
+      .prepare(
+        `
         INSERT INTO ${DbTables.FILES} (
           id, slug, filename, storage_path, s3_url,
           s3_config_id, mimetype, size, etag,
@@ -798,31 +791,31 @@ export async function initializeMultipartUpload(db, url, s3ConfigId, metadata, c
           ?, ?, ?
         )
       `
-        )
-        .bind(
-            fileId,
-            slug,
-            metadata.filename,
-            storagePath,
-            s3Url,
-            s3ConfigId,
-            metadata.contentType || "application/octet-stream",
-            totalSize, // 初始大小
-            null, // 初始ETag为null，在上传完成后更新
-            createdBy,
-            remark,
-            passwordHash,
-            expiresAt,
-            maxViews
-        )
-        .run();
+      )
+      .bind(
+        fileId,
+        slug,
+        metadata.filename,
+        storagePath,
+        s3Url,
+        s3ConfigId,
+        metadata.contentType || "application/octet-stream",
+        totalSize, // 初始大小
+        null, // 初始ETag为null，在上传完成后更新
+        createdBy,
+        remark,
+        passwordHash,
+        expiresAt,
+        maxViews
+      )
+      .run();
 
     // 如果设置了密码，保存明文密码记录（用于分享）
     if (options.password) {
       await db
-          .prepare(`INSERT INTO ${DbTables.FILE_PASSWORDS} (file_id, plain_password, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
-          .bind(fileId, options.password)
-          .run();
+        .prepare(`INSERT INTO ${DbTables.FILE_PASSWORDS} (file_id, plain_password, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+        .bind(fileId, options.password)
+        .run();
     }
 
     // 返回分片上传信息
@@ -863,17 +856,17 @@ export async function initializeMultipartUpload(db, url, s3ConfigId, metadata, c
 export async function completeMultipartUpload(db, fileId, uploadId, parts, encryptionSecret) {
   // 查询文件信息
   const file = await db
-      .prepare(
-          `
+    .prepare(
+      `
       SELECT 
         id, slug, filename, storage_path, s3_url, 
         s3_config_id, mimetype, remark
       FROM ${DbTables.FILES}
       WHERE id = ?
         `
-      )
-      .bind(fileId)
-      .first();
+    )
+    .bind(fileId)
+    .first();
 
   if (!file) {
     throw new Error("文件不存在或已被删除");
@@ -928,8 +921,8 @@ export async function completeMultipartUpload(db, fileId, uploadId, parts, encry
 
     // 更新文件记录
     await db
-        .prepare(
-            `
+      .prepare(
+        `
         UPDATE ${DbTables.FILES}
         SET
           etag = ?,
@@ -937,17 +930,16 @@ export async function completeMultipartUpload(db, fileId, uploadId, parts, encry
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `
-        )
-        .bind(
-            etag,
-            totalSize > 0 ? 1 : 0, // 条件
-            totalSize,
-            fileId
-        )
-        .run();
+      )
+      .bind(
+        etag,
+        totalSize > 0 ? 1 : 0, // 条件
+        totalSize,
+        fileId
+      )
+      .run();
 
     // 更新父目录的修改时间
-    const { updateParentDirectoriesModifiedTimeHelper } = await import("./fsService.js");
     await updateParentDirectoriesModifiedTimeHelper(s3Config, file.storage_path, encryptionSecret);
 
     // 清除与文件相关的缓存 - 使用统一的clearCache函数
@@ -959,8 +951,8 @@ export async function completeMultipartUpload(db, fileId, uploadId, parts, encry
 
     // 获取更新后的文件信息
     const updatedFile = await db
-        .prepare(
-            `
+      .prepare(
+        `
         SELECT 
           id, slug, filename, storage_path, s3_url, 
           mimetype, size, etag, 
@@ -968,9 +960,9 @@ export async function completeMultipartUpload(db, fileId, uploadId, parts, encry
         FROM ${DbTables.FILES}
         WHERE id = ?
       `
-        )
-        .bind(fileId)
-        .first();
+      )
+      .bind(fileId)
+      .first();
 
     // 返回完成的文件信息
     return {
@@ -1005,17 +997,17 @@ export async function completeMultipartUpload(db, fileId, uploadId, parts, encry
 export async function abortMultipartUpload(db, fileId, uploadId, encryptionSecret) {
   // 查询文件信息
   const file = await db
-      .prepare(
-          `
+    .prepare(
+      `
       SELECT 
         id, slug, filename, storage_path, s3_url, 
         s3_config_id, mimetype, remark
       FROM ${DbTables.FILES}
       WHERE id = ?
     `
-      )
-      .bind(fileId)
-      .first();
+    )
+    .bind(fileId)
+    .first();
 
   if (!file) {
     throw new Error("文件不存在或已被删除");
