@@ -7,7 +7,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ConfiguredRetryStrategy } from "@smithy/util-retry";
 import { decryptValue } from "./crypto.js";
 import { S3ProviderTypes } from "../constants/index.js";
-import { getMimeTypeGroup, MIME_GROUPS, getMimeTypeFromFilename, getFileExtension, shouldUseTextPlainForPreview, getContentTypeAndDisposition } from "./fileUtils.js";
+import { getEffectiveMimeType, getContentTypeAndDisposition } from "./fileUtils.js";
 
 /**
  * 创建S3客户端
@@ -235,7 +235,7 @@ async function generateOriginalPresignedUrl(s3Config, storagePath, encryptionSec
     const fileName = normalizedPath.split("/").pop();
 
     // 统一从文件名推断MIME类型，不依赖传入的mimetype参数
-    const effectiveMimetype = getMimeTypeFromFilename(fileName);
+    const effectiveMimetype = getEffectiveMimeType(null, fileName);
     const urlType = forceDownload ? "下载" : "预览";
     console.log(`S3${urlType}URL：文件[${fileName}], MIME[${effectiveMimetype}]`);
 
@@ -246,11 +246,7 @@ async function generateOriginalPresignedUrl(s3Config, storagePath, encryptionSec
     };
 
     // 使用统一的函数获取内容类型和处置方式
-    const { contentType, contentDisposition } = getContentTypeAndDisposition({
-      filename: fileName,
-      mimetype: effectiveMimetype,
-      forceDownload: forceDownload,
-    });
+    const { contentType, contentDisposition } = getContentTypeAndDisposition(fileName, effectiveMimetype, { forceDownload: forceDownload });
 
     // 针对特定服务商设置响应头参数
     switch (s3Config.provider_type) {
@@ -304,7 +300,7 @@ export async function generatePresignedUrl(s3Config, storagePath, encryptionSecr
 
   if (enableCache && userType && userId) {
     // 动态导入缓存管理器，避免循环依赖
-    const { s3UrlCacheManager } = await import("./S3UrlCache.js");
+    const { s3UrlCacheManager } = await import("../cache/S3UrlCache.js");
 
     // 尝试从缓存获取
     const cachedUrl = s3UrlCacheManager.get(s3Config.id, storagePath, forceDownload, userType, userId);
@@ -346,7 +342,7 @@ export async function generatePresignedUrl(s3Config, storagePath, encryptionSecr
 
   // 缓存生成的URL
   if (enableCache && userType && userId && generatedUrl) {
-    const { s3UrlCacheManager } = await import("./S3UrlCache.js");
+    const { s3UrlCacheManager } = await import("../cache/S3UrlCache.js");
     s3UrlCacheManager.set(s3Config.id, storagePath, forceDownload, userType, userId, generatedUrl, s3Config);
     console.log(`💾 S3URL已缓存: ${storagePath}`);
   }
@@ -492,6 +488,7 @@ export async function getDirectoryPresignedUrls(s3Client, sourceS3Config, target
         // 跳过目录标记（与前缀完全匹配的对象）
         if (sourceKey === sourcePrefix) {
           continue;
+          99;
         }
 
         // 计算相对路径和目标路径
@@ -517,8 +514,8 @@ export async function getDirectoryPresignedUrls(s3Client, sourceS3Config, target
         const fileName = pathParts.pop();
 
         // 统一从文件名推断MIME类型，不依赖源文件的MIME类型
-        const { getMimeTypeFromFilename } = await import("../utils/fileUtils.js");
-        contentType = getMimeTypeFromFilename(fileName);
+        const { getEffectiveMimeType } = await import("../utils/fileUtils.js");
+        contentType = getEffectiveMimeType(null, fileName);
         console.log(`目录复制：从文件名[${fileName}]推断MIME类型: ${contentType}`);
 
         // 生成上传预签名URL

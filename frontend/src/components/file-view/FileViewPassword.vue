@@ -1,16 +1,17 @@
 <template>
   <div class="max-w-sm w-full mx-auto p-5 border rounded-lg shadow-sm bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
     <h3 class="text-lg font-medium mb-4 text-gray-900 dark:text-white">{{ t("fileView.password.title") }}</h3>
-    <p class="mb-4 text-sm text-gray-600 dark:text-gray-300">{{ t("fileView.password.title") }}</p>
+    <p class="mb-4 text-sm text-gray-600 dark:text-gray-300">{{ t("fileView.password.description") }}</p>
 
     <form @submit.prevent="verifyPassword" class="space-y-4">
       <!-- 密码输入框 -->
       <div>
-        <label for="password" class="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">{{ t("fileView.password.title") }}</label>
+        <label for="password" class="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">{{ t("fileView.password.label") }}</label>
         <div class="relative">
           <input
             :type="showPassword ? 'text' : 'password'"
             id="password"
+            autocomplete="current-password"
             v-model="password"
             :placeholder="t('fileView.password.placeholder')"
             class="block w-full px-3 py-2 rounded-md shadow-sm border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white dark:bg-gray-700 focus:ring-2 focus:ring-primary-500 focus:border-primary-500 dark:focus:ring-offset-gray-800 password-input"
@@ -66,7 +67,7 @@
 <script setup>
 import { ref, watch, defineProps, defineEmits } from "vue";
 import { useI18n } from "vue-i18n";
-import { api } from "../../api"; // 导入api模块
+import { api } from "@/api"; // 导入api模块
 import { ApiStatus } from "../../api/ApiStatus"; // 导入API状态码常量
 
 const { t } = useI18n();

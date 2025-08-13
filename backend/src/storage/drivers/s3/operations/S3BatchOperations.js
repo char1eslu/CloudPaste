@@ -8,14 +8,14 @@ import { ApiStatus } from "../../../../constants/index.js";
 import { S3Client, DeleteObjectCommand, CopyObjectCommand, ListObjectsV2Command, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { normalizeS3SubPath } from "../utils/S3PathUtils.js";
 import { updateMountLastUsed } from "../../../fs/utils/MountResolver.js";
-import { deleteFileRecordByStoragePath } from "../../../../services/fileService.js";
-import { clearCache } from "../../../../utils/DirectoryCache.js";
+import { clearDirectoryCache } from "../../../../cache/index.js";
 import { generatePresignedUrl, generatePresignedPutUrl, createS3Client, getDirectoryPresignedUrls } from "../../../../utils/s3Utils.js";
 import { getMimeTypeFromFilename } from "../../../../utils/fileUtils.js";
 import { findMountPointByPath } from "../../../fs/utils/MountResolver.js";
 import { updateParentDirectoriesModifiedTime } from "../utils/S3DirectoryUtils.js";
 import { handleFsError } from "../../../fs/utils/ErrorHandler.js";
 import { normalizePath } from "../../../fs/utils/PathResolver.js";
+import { shouldUseRandomSuffix, generateShortId } from "../../../../utils/common.js";
 
 export class S3BatchOperations {
   /**
@@ -23,11 +23,13 @@ export class S3BatchOperations {
    * @param {S3Client} s3Client - S3客户端
    * @param {Object} config - S3配置
    * @param {string} encryptionSecret - 加密密钥
+   * @param {D1Database} db - 数据库实例（用于读取系统设置）
    */
-  constructor(s3Client, config, encryptionSecret) {
+  constructor(s3Client, config, encryptionSecret, db = null) {
     this.s3Client = s3Client;
     this.config = config;
     this.encryptionSecret = encryptionSecret;
+    this.db = db;
   }
 
   /**
@@ -35,11 +37,10 @@ export class S3BatchOperations {
    * @param {S3Client} s3Client - S3客户端实例
    * @param {string} bucketName - 存储桶名称
    * @param {string} prefix - 目录前缀
-   * @param {D1Database} db - 数据库实例
    * @param {string} storageConfigId - 存储配置ID
    * @returns {Promise<void>}
    */
-  async deleteDirectoryRecursive(s3Client, bucketName, prefix, db, storageConfigId) {
+  async deleteDirectoryRecursive(s3Client, bucketName, prefix, storageConfigId) {
     let continuationToken = undefined;
 
     try {
@@ -65,14 +66,7 @@ export class S3BatchOperations {
             const deleteCommand = new DeleteObjectCommand(deleteParams);
             await s3Client.send(deleteCommand);
 
-            // 删除文件记录
-            if (db && storageConfigId) {
-              try {
-                await deleteFileRecordByStoragePath(db, storageConfigId, item.Key);
-              } catch (error) {
-                console.warn(`删除文件记录失败: ${error.message}`);
-              }
-            }
+            // 文件删除完成，无需数据库操作
           });
 
           await Promise.all(deletePromises);
@@ -140,7 +134,7 @@ export class S3BatchOperations {
 
         if (isDirectory) {
           // 对于目录，需要递归删除所有内容
-          await this.deleteDirectoryRecursive(this.s3Client, s3Config.bucket_name, s3SubPath, db, itemMount.storage_config_id);
+          await this.deleteDirectoryRecursive(this.s3Client, s3Config.bucket_name, s3SubPath, itemMount.storage_config_id);
         } else {
           // 对于文件，直接删除
           const deleteParams = {
@@ -167,15 +161,7 @@ export class S3BatchOperations {
         const rootPrefix = s3Config.root_prefix ? (s3Config.root_prefix.endsWith("/") ? s3Config.root_prefix : s3Config.root_prefix + "/") : "";
         await updateParentDirectoriesModifiedTime(this.s3Client, s3Config.bucket_name, s3SubPath, rootPrefix, true);
 
-        // 尝试删除文件记录表中的对应记录
-        try {
-          const fileDeleteResult = await deleteFileRecordByStoragePath(db, itemMount.storage_config_id, s3SubPath);
-          if (fileDeleteResult.deletedCount > 0) {
-            console.log(`从文件记录中删除了${fileDeleteResult.deletedCount}条数据：挂载点=${itemMount.id}, 路径=${s3SubPath}`);
-          }
-        } catch (fileDeleteError) {
-          console.error(`删除文件记录失败: ${fileDeleteError.message}`);
-        }
+        // 文件删除完成，无需数据库操作
 
         // 更新挂载点的最后使用时间
         await updateMountLastUsed(db, itemMount.id);
@@ -392,10 +378,10 @@ export class S3BatchOperations {
 
     if (isDirectory) {
       // 目录复制
-      return await this._copyDirectory(sourceS3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath);
+      return await this._copyDirectory(sourceS3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath, db);
     } else {
       // 文件复制
-      return await this._copyFile(sourceS3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath);
+      return await this._copyFile(sourceS3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath, db);
     }
   }
 
@@ -403,24 +389,38 @@ export class S3BatchOperations {
    * 复制单个文件
    * @private
    */
-  async _copyFile(s3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath) {
+  async _copyFile(s3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath, db = null) {
     // 实现自动重命名逻辑
     let finalS3TargetPath = s3TargetPath;
     let finalTargetPath = targetPath;
     let wasRenamed = false;
 
-    // 检查目标文件是否已存在，如果存在则自动重命名
-    let counter = 1;
-    while (await this._checkItemExists(s3Config.bucket_name, finalS3TargetPath)) {
-      const { baseName, extension, directory } = this._parseFileName(s3TargetPath);
-      finalS3TargetPath = `${directory}${baseName}(${counter})${extension}`;
+    // 根据系统设置决定冲突处理策略
+    const database = db || this.db;
+    let useRandomSuffix = false;
 
-      const { baseName: logicalBaseName, extension: logicalExt, directory: logicalDir } = this._parseFileName(targetPath);
-      finalTargetPath = `${logicalDir}${logicalBaseName}(${counter})${logicalExt}`;
-
-      counter++;
-      wasRenamed = true;
+    if (database) {
+      try {
+        useRandomSuffix = await shouldUseRandomSuffix(database);
+      } catch (error) {
+        console.warn("获取文件命名策略失败，使用默认覆盖模式:", error);
+        useRandomSuffix = false;
+      }
     }
+
+    if (useRandomSuffix) {
+      // 随机后缀模式：检查冲突，如果存在则添加随机后缀
+      if (await this._checkItemExists(s3Config.bucket_name, finalS3TargetPath)) {
+        const { baseName: s3BaseName, extension: s3Ext, directory: s3Dir } = this._parseFileName(s3TargetPath);
+        const { baseName: logicalBaseName, extension: logicalExt, directory: logicalDir } = this._parseFileName(targetPath);
+
+        const shortId = generateShortId();
+        finalS3TargetPath = `${s3Dir}${s3BaseName}-${shortId}${s3Ext}`;
+        finalTargetPath = `${logicalDir}${logicalBaseName}-${shortId}${logicalExt}`;
+        wasRenamed = true;
+      }
+    }
+    // 覆盖模式：不检查冲突，直接使用原始路径覆盖
 
     // 检查目标父目录是否存在（对于文件复制）
     if (finalS3TargetPath.includes("/")) {
@@ -568,7 +568,7 @@ export class S3BatchOperations {
    * 复制目录
    * @private
    */
-  async _copyDirectory(s3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath) {
+  async _copyDirectory(s3Config, s3SourcePath, s3TargetPath, sourcePath, targetPath, db = null) {
     // 确保源路径和目标路径都以斜杠结尾（标准化目录路径）
     const normalizedS3SourcePath = s3SourcePath.endsWith("/") ? s3SourcePath : s3SourcePath + "/";
     let normalizedS3TargetPath = s3TargetPath.endsWith("/") ? s3TargetPath : s3TargetPath + "/";
@@ -833,18 +833,32 @@ export class S3BatchOperations {
           // 创建目标存储的S3客户端用于检查文件存在性
           const targetS3Client = await createS3Client(targetS3Config, this.encryptionSecret);
 
-          // 检查目标文件是否已存在，如果存在则自动重命名
-          let counter = 1;
-          while (await this._checkItemExistsWithClient(targetS3Client, targetS3Config.bucket_name, finalS3TargetPath)) {
-            const { baseName, extension, directory } = this._parseFileName(s3TargetPath);
-            finalS3TargetPath = `${directory}${baseName}(${counter})${extension}`;
+          // 根据系统设置决定冲突处理策略
+          const database = db || this.db;
+          let useRandomSuffix = false;
 
-            const { baseName: logicalBaseName, extension: logicalExt, directory: logicalDir } = this._parseFileName(targetPath);
-            finalTargetPath = `${logicalDir}${logicalBaseName}(${counter})${logicalExt}`;
-
-            counter++;
-            wasRenamed = true;
+          if (database) {
+            try {
+              useRandomSuffix = await shouldUseRandomSuffix(database);
+            } catch (error) {
+              console.warn("获取文件命名策略失败，使用默认覆盖模式:", error);
+              useRandomSuffix = false;
+            }
           }
+
+          if (useRandomSuffix) {
+            // 随机后缀模式：检查冲突，如果存在则添加随机后缀
+            if (await this._checkItemExistsWithClient(targetS3Client, targetS3Config.bucket_name, finalS3TargetPath)) {
+              const { baseName: s3BaseName, extension: s3Ext, directory: s3Dir } = this._parseFileName(s3TargetPath);
+              const { baseName: logicalBaseName, extension: logicalExt, directory: logicalDir } = this._parseFileName(targetPath);
+
+              const shortId = generateShortId();
+              finalS3TargetPath = `${s3Dir}${s3BaseName}-${shortId}${s3Ext}`;
+              finalTargetPath = `${logicalDir}${logicalBaseName}-${shortId}${logicalExt}`;
+              wasRenamed = true;
+            }
+          }
+          // 覆盖模式：不检查冲突，直接使用原始路径覆盖
 
           // 生成源文件的下载预签名URL
           const expiresIn = 3600; // 1小时
@@ -958,7 +972,7 @@ export class S3BatchOperations {
         if (oldIsDirectory) {
           // 重命名目录：复制所有内容到新位置，然后删除原目录
           await this.copyDirectoryRecursive(this.s3Client, s3Config.bucket_name, oldS3SubPath, newS3SubPath, false);
-          await this.deleteDirectoryRecursive(this.s3Client, s3Config.bucket_name, oldS3SubPath, db, mount.storage_config_id);
+          await this.deleteDirectoryRecursive(this.s3Client, s3Config.bucket_name, oldS3SubPath, mount.storage_config_id);
         } else {
           // 重命名文件：复制到新位置，然后删除原文件
           const copyParams = {
@@ -980,12 +994,7 @@ export class S3BatchOperations {
           const deleteCommand = new DeleteObjectCommand(deleteParams);
           await this.s3Client.send(deleteCommand);
 
-          // 更新文件记录
-          try {
-            await deleteFileRecordByStoragePath(db, mount.storage_config_id, oldS3SubPath);
-          } catch (error) {
-            console.warn(`更新文件记录失败: ${error.message}`);
-          }
+          // 文件移动完成，无需数据库操作
         }
 
         // 更新父目录的修改时间

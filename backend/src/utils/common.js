@@ -123,6 +123,29 @@ export function generateShortId() {
 }
 
 /**
+ * 根据系统设置决定是否使用随机后缀
+ * @param {D1Database} db - 数据库实例
+ * @returns {Promise<boolean>} 是否使用随机后缀
+ */
+export async function shouldUseRandomSuffix(db) {
+  try {
+    // 动态导入避免循环依赖
+    const { getSettingMetadata } = await import("../services/systemService.js");
+
+    // 获取文件命名策略设置，默认为覆盖模式
+    const setting = await getSettingMetadata(db, "file_naming_strategy");
+    const strategy = setting ? setting.value : "overwrite";
+
+    // 返回是否使用随机后缀
+    return strategy === "random_suffix";
+  } catch (error) {
+    console.warn("获取文件命名策略失败，使用默认覆盖模式:", error);
+    // 出错时默认使用覆盖模式（不使用随机后缀）
+    return false;
+  }
+}
+
+/**
  * 从文件名中获取文件名和扩展名
  * @param {string} filename - 文件名
  * @returns {Object} 包含文件名和扩展名的对象
@@ -153,4 +176,54 @@ export function getSafeFileName(fileName) {
   // - Windows保留字符 (< > : " | ? *)
   // 保留所有其他Unicode字符，包括中文标点符号
   return fileName.replace(/[<>:"|?*\\/\x00-\x1F\x7F]/g, "_");
+}
+
+/**
+ * 生成唯一的文件slug
+ * @param {D1Database} db - D1数据库实例
+ * @param {string} customSlug - 自定义slug
+ * @param {boolean} override - 是否覆盖已存在的slug
+ * @returns {Promise<string>} 生成的唯一slug
+ */
+export async function generateUniqueFileSlug(db, customSlug = null, override = false) {
+  // 动态导入DbTables以避免循环依赖
+  const { DbTables } = await import("../constants/index.js");
+
+  // 如果提供了自定义slug，验证其格式并检查是否已存在
+  if (customSlug) {
+    // 验证slug格式：只允许字母、数字、横杠和下划线
+    const slugFormatRegex = /^[a-zA-Z0-9_-]+$/;
+    if (!slugFormatRegex.test(customSlug)) {
+      throw new Error("链接后缀格式无效，只能使用字母、数字、下划线和横杠");
+    }
+
+    // 检查slug是否已存在
+    const existingFile = await db.prepare(`SELECT id FROM ${DbTables.FILES} WHERE slug = ?`).bind(customSlug).first();
+
+    // 如果存在并且不覆盖，抛出错误；否则允许使用
+    if (existingFile && !override) {
+      throw new Error("链接后缀已被占用，请使用其他链接后缀");
+    } else if (existingFile && override) {
+      console.log(`允许覆盖已存在的链接后缀: ${customSlug}`);
+    }
+
+    return customSlug;
+  }
+
+  // 生成随机slug (6个字符)
+  let attempts = 0;
+  const maxAttempts = 10;
+  while (attempts < maxAttempts) {
+    const randomSlug = generateShortId();
+
+    // 检查是否已存在
+    const existingFile = await db.prepare(`SELECT id FROM ${DbTables.FILES} WHERE slug = ?`).bind(randomSlug).first();
+    if (!existingFile) {
+      return randomSlug;
+    }
+
+    attempts++;
+  }
+
+  throw new Error("无法生成唯一链接后缀，请稍后再试");
 }

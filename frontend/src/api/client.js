@@ -13,45 +13,34 @@ import { ApiStatus } from "./ApiStatus"; // 导入API状态码常量
  * @returns {Object|null} 操作类型信息或null（如果不支持离线）
  */
 function getOfflineOperationType(endpoint, method) {
-  // 📝 文本分享操作 - 轻量级，适合离线队列
+  // 文本分享操作
   if (endpoint.includes("/paste") && method === "POST") {
     return { type: "createPaste", description: "离线创建文本分享已加入队列" };
   }
 
-  // 📝 管理员文本分享操作
-  if (endpoint.includes("/admin/pastes/")) {
-    if (method === "PUT") return { type: "updateAdminPaste", description: "离线更新管理员文本分享已加入队列" };
-    if (method === "DELETE") return { type: "deleteAdminPaste", description: "离线删除管理员文本分享已加入队列" };
+  // 统一文本分享操作
+  if (endpoint.includes("/pastes/")) {
+    if (method === "PUT") return { type: "updatePaste", description: "离线更新文本分享已加入队列" };
   }
 
-  if (endpoint.includes("/admin/pastes/batch-delete") && method === "POST") {
-    return { type: "batchDeleteAdminPastes", description: "离线批量删除管理员文本分享已加入队列" };
+  if (endpoint.includes("/pastes/batch-delete") && method === "DELETE") {
+    return { type: "batchDeletePastes", description: "离线批量删除文本分享已加入队列" };
   }
 
-  if (endpoint.includes("/admin/pastes/clear-expired") && method === "POST") {
+  if (endpoint.includes("/pastes/clear-expired") && method === "POST") {
     return { type: "clearExpiredPastes", description: "离线清理过期文本分享已加入队列" };
   }
 
-  // 📝 用户文本分享操作
-  if (endpoint.includes("/user/pastes/")) {
-    if (method === "PUT") return { type: "updateUserPaste", description: "离线更新用户文本分享已加入队列" };
-    if (method === "DELETE") return { type: "deleteUserPaste", description: "离线删除用户文本分享已加入队列" };
-  }
-
-  if (endpoint.includes("/user/pastes/batch-delete") && method === "POST") {
-    return { type: "batchDeleteUserPastes", description: "离线批量删除用户文本分享已加入队列" };
-  }
-
-  // ⚙️ 系统管理操作
-  if (endpoint.includes("/admin/system-settings") && method === "PUT") {
-    return { type: "updateSystemSettings", description: "离线系统设置更新已加入队列" };
+  // 系统管理操作
+  if (endpoint.includes("/admin/settings/group/") && method === "PUT") {
+    return { type: "updateGroupSettings", description: "离线分组设置更新已加入队列" };
   }
 
   if (endpoint.includes("/admin/cache/clear") && method === "POST") {
     return { type: "clearCache", description: "离线缓存清理已加入队列" };
   }
 
-  // 🔐 文件密码验证 - 轻量级操作
+  // 文件密码验证
   if (endpoint.includes("/public/files/") && endpoint.includes("/verify") && method === "POST") {
     return { type: "verifyFilePassword", description: "离线文件密码验证已加入队列" };
   }
@@ -101,7 +90,7 @@ async function addAuthToken(headers) {
   try {
     // 尝试从认证Store获取认证信息
     // 注意：这里需要动态导入，因为可能存在循环依赖
-    const { useAuthStore } = await import("../stores/authStore.js");
+    const { useAuthStore } = await import("@/stores/authStore.js");
     const authStore = useAuthStore();
 
     // 检查管理员认证
@@ -251,7 +240,12 @@ export async function fetchApi(endpoint, options = {}) {
     // 首先解析响应内容
     let responseData;
     const contentType = response.headers.get("content-type");
-    if (contentType && contentType.includes("application/json")) {
+
+    // 检查是否需要返回blob响应
+    if (options.responseType === "blob") {
+      responseData = await response.blob();
+      console.log(`📦 API响应Blob(${url}): ${responseData.size} 字节, 类型: ${responseData.type}`);
+    } else if (contentType && contentType.includes("application/json")) {
       responseData = await response.json();
       console.log(`📦 API响应数据(${url}):`, responseData);
     } else {
@@ -261,6 +255,18 @@ export async function fetchApi(endpoint, options = {}) {
 
     // 如果响应不成功，抛出错误
     if (!response.ok) {
+      // 对于blob响应的错误，需要重新解析为JSON获取错误信息
+      if (options.responseType === "blob" && responseData instanceof Blob) {
+        try {
+          const errorText = await responseData.text();
+          const errorData = JSON.parse(errorText);
+          responseData = errorData;
+        } catch (e) {
+          // 如果无法解析为JSON，使用默认错误信息
+          responseData = { message: `HTTP错误 ${response.status}` };
+        }
+      }
+
       // 特殊处理401未授权错误
       if (response.status === ApiStatus.UNAUTHORIZED) {
         console.error(`🚫 授权失败(${url}):`, responseData);
@@ -292,7 +298,7 @@ export async function fetchApi(endpoint, options = {}) {
 
         // 使用认证Store处理认证失败
         try {
-          const { useAuthStore } = await import("../stores/authStore.js");
+          const { useAuthStore } = await import("@/stores/authStore.js");
           const authStore = useAuthStore();
 
           // 管理员令牌过期
@@ -414,7 +420,7 @@ async function handleOfflineOperation(endpoint, options) {
     let authType = null;
 
     try {
-      const { useAuthStore } = await import("../stores/authStore.js");
+      const { useAuthStore } = await import("@/stores/authStore.js");
       const authStore = useAuthStore();
 
       if (authStore.authType === "admin" && authStore.adminToken) {
@@ -451,7 +457,7 @@ async function handleOfflineOperation(endpoint, options) {
     await pwaUtils.storage.addToOfflineQueue(operation);
     console.log(`[PWA] ${operationType.description}`);
 
-    // 🎯 尝试注册Background Sync以确保可靠同步
+    // 尝试注册Background Sync以确保可靠同步
     if (pwaUtils.isBackgroundSyncSupported()) {
       try {
         await pwaUtils.registerBackgroundSync("sync-offline-queue");
