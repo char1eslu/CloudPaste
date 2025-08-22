@@ -5,7 +5,7 @@
 import { MountManager } from "../../storage/managers/MountManager.js";
 import { FileSystem } from "../../storage/fs/FileSystem.js";
 import { getEffectiveMimeType } from "../../utils/fileUtils.js";
-import { handleWebDAVError } from "../utils/errorUtils.js";
+import { handleWebDAVError, addCorsHeaders } from "../utils/errorUtils.js";
 import { clearDirectoryCache } from "../../cache/index.js";
 import { getSettingsByGroup } from "../../services/systemService.js";
 import { getLockManager } from "../utils/LockManager.js";
@@ -69,6 +69,25 @@ export async function handlePut(c, path, userId, userType, db) {
     const mountManager = new MountManager(db, encryptionSecret);
     const fileSystem = new FileSystem(mountManager);
 
+    // 在PUT时自动创建父目录
+    const parentPath = path.substring(0, path.lastIndexOf("/"));
+    if (parentPath && parentPath !== "/" && parentPath !== "") {
+      try {
+        console.log(`WebDAV PUT - 确保父目录存在: ${parentPath}`);
+        await fileSystem.createDirectory(parentPath, userId, userType);
+        console.log(`WebDAV PUT - 父目录已确保存在: ${parentPath}`);
+      } catch (error) {
+        // 如果目录已存在（409 Conflict），这是正常情况，继续上传
+        if (error.status === 409 || error.message?.includes("已存在") || error.message?.includes("exists")) {
+          console.log(`WebDAV PUT - 父目录已存在，继续上传: ${parentPath}`);
+        } else {
+          // 其他错误（如权限不足、存储空间不足等）应该阻止上传
+          console.error(`WebDAV PUT - 创建父目录失败: ${error.message}`);
+          throw error;
+        }
+      }
+    }
+
     // 获取WebDAV上传模式设置
     const uploadMode = await getWebDAVUploadMode(db);
     console.log(`WebDAV PUT - 使用配置的上传模式: ${uploadMode}`);
@@ -126,10 +145,10 @@ export async function handlePut(c, path, userId, userType, db) {
 
       return new Response(null, {
         status: 201, // Created
-        headers: {
+        headers: addCorsHeaders({
           "Content-Type": "text/plain",
           "Content-Length": "0",
-        },
+        }),
       });
     }
 
@@ -163,11 +182,11 @@ export async function handlePut(c, path, userId, userType, db) {
 
         return new Response(null, {
           status: 201, // Created
-          headers: {
+          headers: addCorsHeaders({
             "Content-Type": "text/plain",
             "Content-Length": "0",
             ETag: result.etag || "",
-          },
+          }),
         });
       } catch (error) {
         console.error(`WebDAV PUT - 直接上传失败: ${error.message}`);
@@ -193,11 +212,11 @@ export async function handlePut(c, path, userId, userType, db) {
 
         return new Response(null, {
           status: 201, // Created
-          headers: {
+          headers: addCorsHeaders({
             "Content-Type": "text/plain",
             "Content-Length": "0",
             ETag: result.etag || "",
-          },
+          }),
         });
       } catch (error) {
         console.error(`WebDAV PUT - 流式分片上传失败: ${error.message}`);
